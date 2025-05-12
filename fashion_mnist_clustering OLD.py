@@ -1,26 +1,33 @@
-# 1. Import Libraries
+# 1. Install and Import Required Libraries
+# Uncomment the next line if running in a notebook or new environment
+# !pip install torch torchvision datasets transformers scikit-learn matplotlib seaborn
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Dataset
-from datasets import load_dataset
+from torch.utils.data import DataLoader
 import torchvision.transforms as transforms
+from datasets import load_dataset
+
+import numpy as np
 from sklearn.cluster import KMeans
 from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
-from sklearn.manifold import TSNE
-import matplotlib.pyplot as plt
-import numpy as np
 from sklearn.preprocessing import StandardScaler
-from scipy.stats import mode
-from sklearn.metrics import accuracy_score
+from sklearn.manifold import TSNE
 
-# 2. Load Fashion-MNIST from Hugging Face
-dataset = load_dataset("fashion_mnist")
+import matplotlib.pyplot as plt
+import seaborn as sns
 
-# 3. Custom Torch Dataset
+# 2. Load Fashion-MNIST using Hugging Face Datasets
+hf_dataset = load_dataset("fashion_mnist")
+
+# 3. Custom Dataset Wrapper
+from torch.utils.data import Dataset
+from PIL import Image
+
 class FashionMNISTDataset(Dataset):
-    def __init__(self, hf_dataset, transform=None):
-        self.dataset = hf_dataset
+    def __init__(self, dataset_split, transform=None):
+        self.dataset = dataset_split
         self.transform = transform
 
     def __len__(self):
@@ -38,18 +45,22 @@ transform = transforms.Compose([
     transforms.Normalize((0.5,), (0.5,))
 ])
 
-train_data = FashionMNISTDataset(dataset["train"], transform)
-train_loader = DataLoader(train_data, batch_size=256, shuffle=True)
+train_dataset = FashionMNISTDataset(hf_dataset["train"], transform=transform)
+train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
 
-# 4. Define Convolutional Autoencoder
+# 4. Define Convolutional Autoencoder with BatchNorm and Dropout
 class ConvAutoencoder(nn.Module):
-    def __init__(self, embedding_dim=64):
+    def __init__(self, embedding_dim=32):
         super(ConvAutoencoder, self).__init__()
         self.encoder = nn.Sequential(
-            nn.Conv2d(1, 32, 3, stride=2, padding=1),  # 28x28 → 14x14
+            nn.Conv2d(1, 32, 3, stride=2, padding=1),  
+            nn.BatchNorm2d(32),
             nn.ReLU(),
-            nn.Conv2d(32, 64, 3, stride=2, padding=1),  # 14x14 → 7x7
+            nn.Dropout(0.2),
+            nn.Conv2d(32, 64, 3, stride=2, padding=1), 
+            nn.BatchNorm2d(64),
             nn.ReLU(),
+            nn.Dropout(0.2),
             nn.Flatten(),
             nn.Linear(7 * 7 * 64, embedding_dim)
         )
@@ -57,97 +68,92 @@ class ConvAutoencoder(nn.Module):
             nn.Linear(embedding_dim, 7 * 7 * 64),
             nn.ReLU(),
             nn.Unflatten(1, (64, 7, 7)),
-            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),  # 7x7 → 14x14
+            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),
             nn.ReLU(),
-            nn.ConvTranspose2d(32, 1, 3, stride=2, padding=1, output_padding=1),  # 14x14 → 28x28
+            nn.ConvTranspose2d(32, 1, 3, stride=2, padding=1, output_padding=1),
             nn.Tanh()
         )
 
     def forward(self, x):
         z = self.encoder(x)
         out = self.decoder(z)
-        return out
+        return z, out
 
-
-# 5. Train Autoencoder
+# 5. Initialize Model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model = ConvAutoencoder(embedding_dim=32).to(device)
-
+model = ConvAutoencoder().to(device)
 criterion = nn.MSELoss()
-optimizer = optim.Adam(model.parameters(), lr=1e-3)
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-print("Training autoencoder...")
-model.train()
-for epoch in range(100):
+# 6. Train Autoencoder
+num_epochs = 50
+for epoch in range(num_epochs):
+    model.train()
     total_loss = 0
-    for images, _ in train_loader:
-        images = images.to(device)
-        outputs = model(images)
-        loss = criterion(outputs, images)
+    for data, _ in train_loader:
+        data = data.to(device)
+        encoded, decoded = model(data)
+        loss = criterion(decoded, data)
+
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+
         total_loss += loss.item()
-    print(f"Epoch {epoch+1}, Loss: {total_loss:.4f}")
 
-# 6. Extract Embeddings
-print("Extracting embeddings...")
-model.eval()
-embeddings = []
-labels = []
+    print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {total_loss / len(train_loader):.4f}")
 
-with torch.no_grad():
-    for images, lbls in train_loader:
-        images = images.to(device)
-        z = model.encoder(images)
-        embeddings.append(z.cpu())
-        labels.append(lbls)
+# 7. Extract Latent Representations
+def extract_latents(model, dataloader):
+    model.eval()
+    all_latents, all_labels = [], []
+    with torch.no_grad():
+        for data, labels in dataloader:
+            data = data.to(device)
+            encoded, _ = model(data)
+            all_latents.append(encoded.cpu().numpy())
+            all_labels.append(labels.numpy())
+    return np.concatenate(all_latents), np.concatenate(all_labels)
 
-# Concatenate tensors and convert to NumPy
-embeddings = torch.cat(embeddings).numpy()
-labels = torch.cat(labels).numpy()
-embeddings = StandardScaler().fit_transform(embeddings)
+train_latent, train_labels = extract_latents(model, train_loader)
 
-# 7. Clustering with K-Means
-print("Clustering...")
-kmeans = KMeans(n_clusters=10, random_state=42)
-clusters = kmeans.fit_predict(embeddings)
+# Normalize embeddings
+train_latent = StandardScaler().fit_transform(train_latent)
 
-# 8. Evaluate with Silhouette Score
-print("Evaluating clustering quality...")
-sil_score = silhouette_score(embeddings, clusters)
-db_index = davies_bouldin_score(embeddings, clusters)
-ch_index = calinski_harabasz_score(embeddings, clusters)
-print(f"Silhouette Score: {sil_score:.4f}")
-print(f"Davies Bouldin Score: {db_index:.4f}")
-print(f"Calinski Harabasz Score: {ch_index:.4f}")
+# 8. K-Means Clustering
+n_clusters = 10
+kmeans = KMeans(n_clusters=n_clusters, random_state=42)
+cluster_labels = kmeans.fit_predict(train_latent)
 
-# Map each predicted cluster to the most common true label in it
-label_map = {}
-for i in range(10):
-    mask = (clusters == i)
-    if np.sum(mask) == 0:
-        continue
-    majority_label = mode(labels[mask], keepdims=False).mode
-    label_map[i] = majority_label
+# 9. Evaluation Metrics
+silhouette = silhouette_score(train_latent, cluster_labels)
+davies_bouldin = davies_bouldin_score(train_latent, cluster_labels)
+calinski_harabasz = calinski_harabasz_score(train_latent, cluster_labels)
 
-# Generate predicted labels based on the mapping
-predicted_labels = np.array([label_map[c] for c in clusters])
+print(f"Silhouette Score: {silhouette:.4f}")
+print(f"Davies-Bouldin Index: {davies_bouldin:.4f}")
+print(f"Calinski-Harabasz Index: {calinski_harabasz:.4f}")
 
-# Calculate cluster purity (approximated as classification accuracy)
-purity = accuracy_score(labels, predicted_labels)
-print(f"Cluster Purity (Label Alignment Accuracy): {purity:.4f}")
+# 10. t-SNE Visualization (subset)
+tsne = TSNE(n_components=2, random_state=42)
+tsne_result = tsne.fit_transform(train_latent[:2000])
 
-# 9. Visualize with t-SNE
-print("Visualizing cluster separation with t-SNE...")
-tsne = TSNE(n_components=2, perplexity=30, random_state=42)
-tsne_result = tsne.fit_transform(embeddings)
-
-plt.figure(figsize=(10, 6))
-scatter = plt.scatter(tsne_result[:, 0], tsne_result[:, 1], c=clusters, cmap='tab10', s=10)
-plt.title("t-SNE Visualization of Clusters")
+plt.figure(figsize=(10, 8))
+scatter = plt.scatter(tsne_result[:, 0], tsne_result[:, 1], c=cluster_labels[:2000], cmap='tab10', alpha=0.6)
 plt.colorbar(scatter)
-plt.xlabel("t-SNE 1")
-plt.ylabel("t-SNE 2")
-plt.tight_layout()
+plt.title('t-SNE Visualization of Clusters')
+plt.xlabel('t-SNE 1')
+plt.ylabel('t-SNE 2')
+plt.show()
+
+# 11. Confusion Matrix
+confusion_matrix = np.zeros((10, 10))
+for true_label, cluster_label in zip(train_labels[:2000], cluster_labels[:2000]):
+    confusion_matrix[true_label, cluster_label] += 1
+
+plt.figure(figsize=(10, 8))
+sns.heatmap(confusion_matrix, annot=True, fmt='.0f', cmap='Blues')
+plt.xlabel('Cluster Label')
+plt.ylabel('True Label')
+plt.title('Cluster Assignment vs True Label')
 plt.show()

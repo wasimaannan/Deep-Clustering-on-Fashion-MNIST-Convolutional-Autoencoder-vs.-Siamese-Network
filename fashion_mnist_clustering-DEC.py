@@ -120,40 +120,138 @@ train_latent, train_labels = extract_latents(model, train_loader)
 # Normalize embeddings
 train_latent = StandardScaler().fit_transform(train_latent)
 
-# 8. K-Means Clustering
+# 8. Define DEC Clustering Layer and KL Divergence Loss
+class ClusteringLayer(nn.Module):
+    def __init__(self, n_clusters, embedding_dim):
+        super(ClusteringLayer, self).__init__()
+        self.n_clusters = n_clusters
+        self.embedding_dim = embedding_dim
+        self.cluster_centers = nn.Parameter(torch.randn(n_clusters, embedding_dim))
+
+    def forward(self, z):
+        # Compute Student's t-distribution (q_ij)
+        q = 1.0 / (1.0 + torch.sum((z.unsqueeze(1) - self.cluster_centers)**2, dim=2))
+        q = q ** ((1 + 1) / 2)
+        q = (q.t() / torch.sum(q, dim=1)).t()
+        return q
+
+def target_distribution(q):
+    weight = (q ** 2) / torch.sum(q, dim=0)
+    return (weight.t() / torch.sum(weight, dim=1)).t()
+
+# 9. Initialize Clustering Layer with Pretrained Encoder Embeddings
+train_latent, train_labels = extract_latents(model, train_loader)
+train_latent = StandardScaler().fit_transform(train_latent)
+
+# Run KMeans to initialize DEC cluster centers
 n_clusters = 10
-kmeans = KMeans(n_clusters=n_clusters, random_state=42)
-cluster_labels = kmeans.fit_predict(train_latent)
+kmeans = KMeans(n_clusters=n_clusters, n_init=20, random_state=42)
+cluster_ids = kmeans.fit_predict(train_latent)
 
-# 9. Evaluation Metrics
-silhouette = silhouette_score(train_latent, cluster_labels)
-davies_bouldin = davies_bouldin_score(train_latent, cluster_labels)
-calinski_harabasz = calinski_harabasz_score(train_latent, cluster_labels)
+# Attach DEC layer
+dec_layer = ClusteringLayer(n_clusters=n_clusters, embedding_dim=32).to(device)
+dec_layer.cluster_centers.data = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32).to(device)
 
+# 10. DEC Training (Fine-tune Encoder + Cluster Assignments)
+dec_optimizer = optim.Adam(list(model.encoder.parameters()) + list(dec_layer.parameters()), lr=0.001)
+dec_epochs = 50
+update_interval = 10
+
+print("\nFine-tuning with DEC...")
+for epoch in range(dec_epochs):
+    model.eval()
+    all_q, all_labels = [], []
+
+    # Step 1: Compute soft assignments (q_ij) for entire dataset
+    with torch.no_grad():
+        for data, labels in train_loader:
+            data = data.to(device)
+            z, _ = model(data)
+            q = dec_layer(z)
+            all_q.append(q.cpu())
+            all_labels.append(labels)
+    all_q = torch.cat(all_q)
+    all_labels = torch.cat(all_labels)
+    p = target_distribution(all_q)
+
+    # Step 2: Train with KL divergence loss
+    model.train()
+    idx = 0
+    for data, _ in train_loader:
+        data = data.to(device)
+        batch_size = data.size(0)
+
+        z, _ = model(data)
+        q_batch = dec_layer(z)
+        p_batch = p[idx:idx + batch_size].to(device)
+        idx += batch_size
+
+        # KL divergence loss
+        loss = torch.nn.KLDivLoss(reduction="batchmean")(torch.log(q_batch), p_batch)
+
+        dec_optimizer.zero_grad()
+        loss.backward()
+        dec_optimizer.step()
+
+    print(f"DEC Epoch [{epoch + 1}/{dec_epochs}], KL Loss: {loss.item():.4f}")
+
+# 11. Final Inference: Assign Clusters
+model.eval()
+dec_layer.eval()
+final_latents, final_labels = extract_latents(model, train_loader)
+final_latents = torch.tensor(StandardScaler().fit_transform(final_latents)).to(device)
+
+with torch.no_grad():
+    z = final_latents
+    q = 1.0 / (1.0 + torch.sum((z.unsqueeze(1) - dec_layer.cluster_centers.data.cpu())**2, dim=2))
+    q = q ** ((1 + 1) / 2)
+    q = (q.t() / torch.sum(q, dim=1)).t()
+    final_cluster_assignments = torch.argmax(q, dim=1).cpu().numpy()
+
+# 12. Evaluation
+from sklearn.metrics import accuracy_score
+from scipy.stats import mode
+
+def cluster_purity(y_true, y_pred):
+    labels = np.zeros_like(y_pred)
+    for i in range(n_clusters):
+        mask = (y_pred == i)
+        if np.sum(mask) == 0:
+            continue
+        labels[mask] = mode(y_true[mask], keepdims=False).mode
+    return accuracy_score(y_true, labels)
+
+silhouette = silhouette_score(final_latents.cpu(), final_cluster_assignments)
+davies_bouldin = davies_bouldin_score(final_latents.cpu(), final_cluster_assignments)
+calinski_harabasz = calinski_harabasz_score(final_latents.cpu(), final_cluster_assignments)
+purity = cluster_purity(train_labels, final_cluster_assignments)
+
+print(f"\nDEC Results:")
 print(f"Silhouette Score: {silhouette:.4f}")
 print(f"Davies-Bouldin Index: {davies_bouldin:.4f}")
 print(f"Calinski-Harabasz Index: {calinski_harabasz:.4f}")
+print(f"Cluster Purity: {purity:.4f}")
 
-# 10. t-SNE Visualization (subset)
+# 13. Visualization
 tsne = TSNE(n_components=2, random_state=42)
-tsne_result = tsne.fit_transform(train_latent[:2000])
+tsne_result = tsne.fit_transform(final_latents.cpu().numpy()[:2000])
 
 plt.figure(figsize=(10, 8))
-scatter = plt.scatter(tsne_result[:, 0], tsne_result[:, 1], c=cluster_labels[:2000], cmap='tab10', alpha=0.6)
+scatter = plt.scatter(tsne_result[:, 0], tsne_result[:, 1], c=final_cluster_assignments[:2000], cmap='tab10', alpha=0.6)
 plt.colorbar(scatter)
-plt.title('t-SNE Visualization of Clusters')
+plt.title('t-SNE Visualization of DEC Clusters')
 plt.xlabel('t-SNE 1')
 plt.ylabel('t-SNE 2')
 plt.show()
 
-# 11. Confusion Matrix
+# Confusion matrix
 confusion_matrix = np.zeros((10, 10))
-for true_label, cluster_label in zip(train_labels[:2000], cluster_labels[:2000]):
+for true_label, cluster_label in zip(train_labels[:2000], final_cluster_assignments[:2000]):
     confusion_matrix[true_label, cluster_label] += 1
 
 plt.figure(figsize=(10, 8))
 sns.heatmap(confusion_matrix, annot=True, fmt='.0f', cmap='Blues')
 plt.xlabel('Cluster Label')
 plt.ylabel('True Label')
-plt.title('Cluster Assignment vs True Label')
+plt.title('Cluster Assignment vs True Label (DEC)')
 plt.show()
