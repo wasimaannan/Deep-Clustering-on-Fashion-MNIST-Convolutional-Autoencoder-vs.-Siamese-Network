@@ -15,10 +15,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 def run_autoencoder_clustering():
-    # 2. Load Fashion-MNIST using Hugging Face Datasets
     hf_dataset = load_dataset("fashion_mnist")
-
-    # 3. Custom Dataset Wrapper
     from torch.utils.data import Dataset
     from PIL import Image
 
@@ -45,7 +42,6 @@ def run_autoencoder_clustering():
     train_dataset = FashionMNISTDataset(hf_dataset["train"], transform=transform)
     train_loader = DataLoader(train_dataset, batch_size=256, shuffle=True)
 
-    # 4. Define Convolutional Autoencoder with BatchNorm and Dropout
     class ConvAutoencoder(nn.Module):
         def __init__(self, embedding_dim=32):
             super(ConvAutoencoder, self).__init__()
@@ -76,13 +72,13 @@ def run_autoencoder_clustering():
             out = self.decoder(z)
             return z, out
 
-    # 5. Initialize Model
+    # Initialize Model
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = ConvAutoencoder().to(device)
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-    # 6. Train Autoencoder
+    # Train Autoencoder
     num_epochs = 50
     for epoch in range(num_epochs):
         model.train()
@@ -100,7 +96,7 @@ def run_autoencoder_clustering():
 
         print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {total_loss / len(train_loader):.4f}")
 
-    # 7. Extract Latent Representations
+    # Extract Latent Representations
     def extract_latents(model, dataloader):
         model.eval()
         all_latents, all_labels = [], []
@@ -117,12 +113,12 @@ def run_autoencoder_clustering():
     # Normalize embeddings
     train_latent = StandardScaler().fit_transform(train_latent)
 
-    # 8. K-Means Clustering
+    # K-Means Clustering
     n_clusters = 10
     kmeans = KMeans(n_clusters=n_clusters, random_state=42)
     cluster_labels = kmeans.fit_predict(train_latent)
 
-    # 9. Evaluation Metrics
+    # Evaluation Metrics
     silhouette = silhouette_score(train_latent, cluster_labels)
     davies_bouldin = davies_bouldin_score(train_latent, cluster_labels)
     calinski_harabasz = calinski_harabasz_score(train_latent, cluster_labels)
@@ -131,7 +127,7 @@ def run_autoencoder_clustering():
     # print(f"Davies-Bouldin Index: {davies_bouldin:.4f}")
     # print(f"Calinski-Harabasz Index: {calinski_harabasz:.4f}")
 
-    # 10. t-SNE Visualization (subset)
+    # t-SNE 
     tsne = TSNE(n_components=2, random_state=42)
     tsne_result = tsne.fit_transform(train_latent[:2000])
 
@@ -143,7 +139,7 @@ def run_autoencoder_clustering():
     plt.ylabel('t-SNE 2')
     plt.show()
 
-    # 11. Confusion Matrix
+    # Confusion Matrix
     confusion_matrix = np.zeros((10, 10))
     for true_label, cluster_label in zip(train_labels[:2000], cluster_labels[:2000]):
         confusion_matrix[true_label, cluster_label] += 1

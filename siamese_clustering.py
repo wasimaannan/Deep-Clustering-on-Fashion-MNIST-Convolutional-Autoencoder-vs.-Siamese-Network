@@ -23,7 +23,6 @@ def run_siamese_clustering():
         transforms.Normalize((0.5,), (0.5,))
     ])
 
-    # 2. Siamese Pair Dataset 
     class SiameseFashionDataset(Dataset):
         def __init__(self, hf_dataset, transform=None):
             self.data = hf_dataset
@@ -63,7 +62,6 @@ def run_siamese_clustering():
     train_dataset = SiameseFashionDataset(dataset["train"], transform)
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
 
-    # 3. Embedding Network 
     class EmbeddingNet(nn.Module):
         def __init__(self):
             super(EmbeddingNet, self).__init__()
@@ -83,7 +81,6 @@ def run_siamese_clustering():
         def forward(self, x):
             return self.net(x)
 
-    # 4. Siamese Network Wrapper 
     class SiameseNetwork(nn.Module):
         def __init__(self, embedding_net):
             super(SiameseNetwork, self).__init__()
@@ -94,7 +91,7 @@ def run_siamese_clustering():
             z2 = self.embedding_net(x2)
             return z1, z2
 
-    # 5. Contrastive Loss 
+    # Contrastive Loss 
     class ContrastiveLoss(nn.Module):
         def __init__(self, margin=1.0):
             super(ContrastiveLoss, self).__init__()
@@ -105,7 +102,7 @@ def run_siamese_clustering():
             loss = label * d.pow(2) + (1 - label) * F.relu(self.margin - d).pow(2)
             return loss.mean()
 
-    # 6. Training
+    # Training
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     embedding_net = EmbeddingNet().to(device)
     model = SiameseNetwork(embedding_net).to(device)
@@ -128,7 +125,7 @@ def run_siamese_clustering():
 
         print(f"Epoch [{epoch + 1}/{epochs}], Loss: {total_loss:.4f}")
 
-    # 7. Generate Embeddings for Clustering 
+    # Embeddings for Clustering 
     class FashionEmbeddingDataset(Dataset):
         def __init__(self, hf_dataset, transform):
             self.data = hf_dataset
@@ -159,7 +156,7 @@ def run_siamese_clustering():
     all_embeddings = np.vstack(all_embeddings)
     all_labels = np.concatenate(all_labels)
 
-    # 8. Clustering Evaluation 
+    # Clustering Evaluation 
     kmeans = KMeans(n_clusters=10, random_state=42).fit(all_embeddings)
     sil_score = silhouette_score(all_embeddings, kmeans.labels_)
     db_index = davies_bouldin_score(all_embeddings, kmeans.labels_)
@@ -169,7 +166,7 @@ def run_siamese_clustering():
     # print(f"Davies-Bouldin Index: {db_index:.4f}")
     # print(f"Calinski-Harabasz Index: {ch_index:.4f}")
 
-    # 9. t-SNE Visualization 
+    # t-SNE 
     tsne = TSNE(n_components=2, random_state=42)
     tsne_result = tsne.fit_transform(all_embeddings[:2000])  
 
@@ -183,7 +180,7 @@ def run_siamese_clustering():
     plt.tight_layout()
     plt.show()
 
-    # 10. Confusion Matrix 
+    # Confusion Matrix 
     from sklearn.metrics import confusion_matrix
     from scipy.stats import mode
 
